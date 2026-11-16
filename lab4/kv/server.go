@@ -4,8 +4,9 @@ import (
 	"context"
 
 	"sync" // i added
-    "time" // i added
-	"google.golang.org/grpc/codes" // i added
+	"time" // i added
+
+	"google.golang.org/grpc/codes"  // i added
 	"google.golang.org/grpc/status" // i added
 
 	"cs426.yale.edu/lab4/kv/proto"
@@ -22,7 +23,7 @@ type KvServerImpl struct {
 	shutdown   chan struct{}
 
 	// i added these two
-	mu sync.RWMutex // server.mu will protect server.shards for when we add and remove shards
+	mu     sync.RWMutex // server.mu will protect server.shards for when we add and remove shards
 	shards map[int]*shardData
 }
 
@@ -30,69 +31,103 @@ type KvServerImpl struct {
 // kv entry - one stored item. ex:
 // value: world, expiresAt: time.Now().Add(10 * time.Second)
 type entry struct {
-    value string
-    expiresAt time.Time
+	value     string
+	expiresAt time.Time
 }
 
 // collection ef key value pairs belonging to one shard
 type shardData struct {
-    mu sync.RWMutex // will protect the actual key-value pairs within each shard
-    items map[string]entry
+	mu    sync.RWMutex // will protect the actual key-value pairs within each shard
+	items map[string]entry
 }
 
+// DONE: Part C
 func (server *KvServerImpl) handleShardMapUpdate() {
-	// TODO: Part C
-}
+	target := make(map[int]bool)
+	for _, shard := range server.shardMap.ShardsForNode(server.nodeName) {
+		target[shard] = true
+	}
 
+	server.mu.RLock()
+	current := make(map[int]bool)
+	for shard := range server.shards {
+		current[shard] = true
+	}
+	server.mu.RUnlock()
+
+	server.mu.Lock()
+	for shard := range current {
+		if !target[shard] {
+			delete(server.shards, shard)
+		}
+	}
+	server.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for shard := range target {
+		if current[shard] {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			data := &shardData{
+				items: make(map[string]entry),
+			}
+			server.mu.Lock()
+			server.shards[shard] = data
+			server.mu.Unlock()
+		}()
+	}
+	wg.Wait()
+}
 
 // my function to get rid of expired entries
 func (server *KvServerImpl) cleanupExpired() {
-    // snapshot of shards
-    server.mu.RLock()
-    shards := make([]*shardData, 0, len(server.shards))
-    for _, data := range server.shards {
-        shards = append(shards, data)
-    }
-    server.mu.RUnlock()
+	// snapshot of shards
+	server.mu.RLock()
+	shards := make([]*shardData, 0, len(server.shards))
+	for _, data := range server.shards {
+		shards = append(shards, data)
+	}
+	server.mu.RUnlock()
 
-    now := time.Now()
+	now := time.Now()
 
-    // get rid of expired entries from each shard
-    for _, data := range shards {
-        data.mu.Lock()
+	// get rid of expired entries from each shard
+	for _, data := range shards {
+		data.mu.Lock()
 
-        for key, value := range data.items {
-            if !now.Before(value.expiresAt) {
-                delete(data.items, key)
-            }
-        }
+		for key, value := range data.items {
+			if !now.Before(value.expiresAt) {
+				delete(data.items, key)
+			}
+		}
 
-        // release old map's storage when empty
-        if len(data.items) == 0 {
-            data.items = make(map[string]entry)
-        }
+		// release old map's storage when empty
+		if len(data.items) == 0 {
+			data.items = make(map[string]entry)
+		}
 
-        data.mu.Unlock()
-    }
+		data.mu.Unlock()
+	}
 }
-
 
 // made by me
 // cleans up expired entries every 250 milliseconds
 func (server *KvServerImpl) cleanupLoop() {
-    ticker := time.NewTicker(250 * time.Millisecond)
-    defer ticker.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
 
-    for {
-        select {
-        case <-server.shutdown:
-            return
-        case <-ticker.C:
-            server.cleanupExpired()
-        }
-    }
+	for {
+		select {
+		case <-server.shutdown:
+			return
+		case <-ticker.C:
+			server.cleanupExpired()
+		}
+	}
 }
-
 
 func (server *KvServerImpl) shardMapListenLoop() {
 	listener := server.listener.UpdateChannel()
@@ -100,32 +135,57 @@ func (server *KvServerImpl) shardMapListenLoop() {
 		select {
 		case <-server.shutdown:
 			return
-		case <-listener:
+		case _, ok := <-listener:
+			if !ok {
+				return
+			}
 			server.handleShardMapUpdate()
 		}
 	}
 }
 
-// helper function i added
-func (server *KvServerImpl) getOrCreateShard(shard int) *shardData {
-	// protects the shard map
-	server.mu.Lock()
-	defer server.mu.Unlock()
+func (server *KvServerImpl) lookupShard(shard int) (*shardData, error) {
+	server.mu.RLock()
+	defer server.mu.RUnlock()
 
-	// exists
-	if data, ok := server.shards[shard]; ok {
-		return data
+	data, ok := server.shards[shard]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "shard not found")
 	}
 
-	// does not exist
-	data := &shardData {
-		// --> make an empty map for that shard
-		items: make(map[string]entry),
-	}
-
-	server.shards[shard] = data
-	return data
+	return data, nil
 }
+
+// // helper function i added
+// func (server *KvServerImpl) getOrCreateShard(shard int) *shardData {
+// 	// protects the shard map
+// 	server.mu.Lock()
+// 	defer server.mu.Unlock()
+
+// 	// exists
+// 	if data, ok := server.shards[shard]; ok {
+// 		return data
+// 	}
+
+// 	// does not exist
+// 	data := &shardData {
+// 		// --> make an empty map for that shard
+// 		items: make(map[string]entry),
+// 	}
+
+// 	server.shards[shard] = data
+// 	return data
+// }
+
+// // my function - check if a server hosts a shard
+// func (server *KvServerImpl) hostsShard(shard int) bool {
+//     for _, s := range server.shardMap.ShardsForNode(server.nodeName) {
+//         if s == shard {
+//             return true
+//         }
+//     }
+//     return false
+// }
 
 func MakeKvServer(nodeName string, shardMap *ShardMap, clientPool ClientPool) *KvServerImpl {
 	listener := shardMap.MakeListener()
@@ -135,10 +195,10 @@ func MakeKvServer(nodeName string, shardMap *ShardMap, clientPool ClientPool) *K
 		listener:   &listener,
 		clientPool: clientPool,
 		shutdown:   make(chan struct{}),
-		shards: make(map[int]*shardData), // i added
+		shards:     make(map[int]*shardData), // i added
 	}
-	go server.shardMapListenLoop()
 	server.handleShardMapUpdate()
+	go server.shardMapListenLoop()
 
 	// i added
 	// asynchronous go routine to clean up expired entries
@@ -175,12 +235,10 @@ func (server *KvServerImpl) Get(
 	// find shard containing key
 	shard := GetShardForKey(request.Key, server.shardMap.NumShards())
 
-	// check if server actually owns the shard 
-	if !server.hostsShard(shard) {
-		return nil, status.Error(codes.NotFound, "shard not hosted")
+	data, err := server.lookupShard(shard)
+	if err != nil {
+		return nil, err
 	}
-	
-	data := server.getOrCreateShard(shard)
 
 	// acquire shard's read lock
 	data.mu.RLock()
@@ -197,23 +255,13 @@ func (server *KvServerImpl) Get(
 	}
 
 	return &proto.GetResponse{
-        Value: response.value,
-        WasFound: true,
-    }, nil
-	
+		Value:    response.value,
+		WasFound: true,
+	}, nil
+
 	// look up request.Key in data.items
 	// if key doesn't exist or has expired return WasFound: false
 	// otherwise return value with WasFound true
-}
-
-// my function - check if a server hosts a shard
-func (server *KvServerImpl) hostsShard(shard int) bool {
-    for _, s := range server.shardMap.ShardsForNode(server.nodeName) {
-        if s == shard {
-            return true
-        }
-    }
-    return false
 }
 
 func (server *KvServerImpl) Set(
@@ -234,24 +282,22 @@ func (server *KvServerImpl) Set(
 	// calculate which shard the key belongs to
 	shard := GetShardForKey(request.Key, server.shardMap.NumShards())
 
-	// check if server actually owns the shard 
-	if !server.hostsShard(shard) {
-		return nil, status.Error(codes.NotFound, "shard not hosted")
-	}
-
 	// find that shard's storage
-	data := server.getOrCreateShard(shard)
+	data, err := server.lookupShard(shard)
+	if err != nil {
+		return nil, err
+	}
 
 	// acquire its write lock
 	data.mu.Lock()
-    defer data.mu.Unlock()
+	defer data.mu.Unlock()
 
 	// calculate when value expires
 	expiration := time.Now().Add(time.Duration(request.TtlMs) * time.Millisecond)
 
 	// store the value and expiration timestamp
 	data.items[request.Key] = entry{
-		value: request.Value,
+		value:     request.Value,
 		expiresAt: expiration,
 	}
 
@@ -275,12 +321,10 @@ func (server *KvServerImpl) Delete(
 
 	shard := GetShardForKey(request.Key, server.shardMap.NumShards())
 
-	// check if server actually owns the shard 
-	if !server.hostsShard(shard) {
-		return nil, status.Error(codes.NotFound, "shard not hosted")
+	data, err := server.lookupShard(shard)
+	if err != nil {
+		return nil, err
 	}
-
-	data := server.getOrCreateShard(shard)
 
 	data.mu.Lock()
 	defer data.mu.Unlock()
@@ -291,9 +335,32 @@ func (server *KvServerImpl) Delete(
 	return &proto.DeleteResponse{}, nil
 }
 
+// DONE: Part C
 func (server *KvServerImpl) GetShardContents(
 	ctx context.Context,
 	request *proto.GetShardContentsRequest,
 ) (*proto.GetShardContentsResponse, error) {
-	panic("TODO: Part C")
+	data, err := server.lookupShard(int(request.Shard))
+	if err != nil {
+		return nil, err
+	}
+
+	data.mu.RLock()
+	defer data.mu.RUnlock()
+
+	values := make([]*proto.GetShardValue, 0, len(data.items))
+
+	for key, e := range data.items {
+		remainingTtlMs := time.Until(e.expiresAt).Milliseconds()
+		if remainingTtlMs <= 0 {
+			continue // skip expired entries
+		}
+		values = append(values, &proto.GetShardValue{
+			Key:            key,
+			Value:          e.value,
+			TtlMsRemaining: remainingTtlMs,
+		})
+	}
+
+	return &proto.GetShardContentsResponse{Values: values}, nil
 }
