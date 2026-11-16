@@ -42,6 +42,8 @@ type shardData struct {
 
 func (server *KvServerImpl) handleShardMapUpdate() {
 	// TODO: Part C
+
+
 }
 
 
@@ -106,26 +108,47 @@ func (server *KvServerImpl) shardMapListenLoop() {
 	}
 }
 
-// helper function i added
-func (server *KvServerImpl) getOrCreateShard(shard int) *shardData {
-	// protects the shard map
-	server.mu.Lock()
-	defer server.mu.Unlock()
+func (server *KvServerImpl) lookupShard(shard int) (*shardData, error) {
+	server.mu.RLock()
+	defer server.mu.RUnlock()
 
-	// exists
-	if data, ok := server.shards[shard]; ok {
-		return data
+	if data, ok := server.shards[shard]; !ok {
+		return nil, status.Error(codes.NotFound, "shard not found")
 	}
 
-	// does not exist
-	data := &shardData {
-		// --> make an empty map for that shard
-		items: make(map[string]entry),
-	}
-
-	server.shards[shard] = data
-	return data
+	return data, nil
 }
+
+// // helper function i added
+// func (server *KvServerImpl) getOrCreateShard(shard int) *shardData {
+// 	// protects the shard map
+// 	server.mu.Lock()
+// 	defer server.mu.Unlock()
+
+// 	// exists
+// 	if data, ok := server.shards[shard]; ok {
+// 		return data
+// 	}
+
+// 	// does not exist
+// 	data := &shardData {
+// 		// --> make an empty map for that shard
+// 		items: make(map[string]entry),
+// 	}
+
+// 	server.shards[shard] = data
+// 	return data
+// }
+
+// // my function - check if a server hosts a shard
+// func (server *KvServerImpl) hostsShard(shard int) bool {
+//     for _, s := range server.shardMap.ShardsForNode(server.nodeName) {
+//         if s == shard {
+//             return true
+//         }
+//     }
+//     return false
+// }
 
 func MakeKvServer(nodeName string, shardMap *ShardMap, clientPool ClientPool) *KvServerImpl {
 	listener := shardMap.MakeListener()
@@ -174,13 +197,11 @@ func (server *KvServerImpl) Get(
 
 	// find shard containing key
 	shard := GetShardForKey(request.Key, server.shardMap.NumShards())
-
-	// check if server actually owns the shard 
-	if !server.hostsShard(shard) {
-		return nil, status.Error(codes.NotFound, "shard not hosted")
-	}
 	
-	data := server.getOrCreateShard(shard)
+	data, err := server.lookupShard(shard)
+	if err != nil {
+		return nil, err
+	}
 
 	// acquire shard's read lock
 	data.mu.RLock()
@@ -206,16 +227,6 @@ func (server *KvServerImpl) Get(
 	// otherwise return value with WasFound true
 }
 
-// my function - check if a server hosts a shard
-func (server *KvServerImpl) hostsShard(shard int) bool {
-    for _, s := range server.shardMap.ShardsForNode(server.nodeName) {
-        if s == shard {
-            return true
-        }
-    }
-    return false
-}
-
 func (server *KvServerImpl) Set(
 	ctx context.Context,
 	request *proto.SetRequest,
@@ -234,13 +245,11 @@ func (server *KvServerImpl) Set(
 	// calculate which shard the key belongs to
 	shard := GetShardForKey(request.Key, server.shardMap.NumShards())
 
-	// check if server actually owns the shard 
-	if !server.hostsShard(shard) {
-		return nil, status.Error(codes.NotFound, "shard not hosted")
-	}
-
 	// find that shard's storage
-	data := server.getOrCreateShard(shard)
+	data, err := server.lookupShard(shard)
+	if err != nil {
+		return nil, err
+	}
 
 	// acquire its write lock
 	data.mu.Lock()
@@ -275,12 +284,10 @@ func (server *KvServerImpl) Delete(
 
 	shard := GetShardForKey(request.Key, server.shardMap.NumShards())
 
-	// check if server actually owns the shard 
-	if !server.hostsShard(shard) {
-		return nil, status.Error(codes.NotFound, "shard not hosted")
+	data, err := server.lookupShard(shard)
+	if err != nil {
+		return nil, err
 	}
-
-	data := server.getOrCreateShard(shard)
 
 	data.mu.Lock()
 	defer data.mu.Unlock()
