@@ -2,6 +2,7 @@ package kv
 
 import (
 	"context"
+	"math/rand/v2"
 
 	"sync" // i added
 	"time" // i added
@@ -41,6 +42,8 @@ type shardData struct {
 	items map[string]entry
 }
 
+// HELPER FUNCTIONS ------------------------------------------------
+
 // DONE: Part C
 func (server *KvServerImpl) handleShardMapUpdate() {
 	target := make(map[int]bool)
@@ -72,7 +75,7 @@ func (server *KvServerImpl) handleShardMapUpdate() {
 		go func() {
 			defer wg.Done()
 			data := &shardData{
-				items: make(map[string]entry),
+				items: server.copyShard(shard),
 			}
 			server.mu.Lock()
 			server.shards[shard] = data
@@ -186,6 +189,56 @@ func (server *KvServerImpl) lookupShard(shard int) (*shardData, error) {
 //     }
 //     return false
 // }
+
+func (server *KvServerImpl) copyShard(shard int) map[string]entry {
+	peers := make([]string, 0)
+	for _, node := range server.shardMap.NodesForShard(shard) {
+		if node != server.nodeName {
+			peers = append(peers, node)
+		}
+	}
+
+	rand.Shuffle(len(peers), func(i, j int) {
+		peers[i], peers[j] = peers[j], peers[i]
+	})
+
+	if len(peers) == 0 {
+		return make(map[string]entry) // brand-new shard, nothing to copy
+	}
+
+	for _, peer := range peers {
+		client, err := server.clientPool.GetClient(peer)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{"node": server.nodeName, "peer": peer, "shard": shard}).WithError(err).Warn("GetClient failed")
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, err := client.GetShardContents(ctx, &proto.GetShardContentsRequest{Shard: int32(shard)})
+		cancel() // release the timer right away; don't defer inside a loop
+		if err != nil {
+			logrus.WithFields(logrus.Fields{"node": server.nodeName, "peer": peer, "shard": shard}).WithError(err).Warn("failed to get shard contents from peer")
+			continue
+		}
+
+		items := make(map[string]entry)
+		now := time.Now()
+		for _, value := range resp.Values {
+			expiration := now.Add(time.Duration(value.TtlMsRemaining) * time.Millisecond)
+			items[value.Key] = entry{
+				value:     value.Value,
+				expiresAt: expiration,
+			}
+		}
+
+		return items
+	}
+
+	logrus.Errorf("node %s failed to copy shard %d from any peer", server.nodeName, shard)
+	return make(map[string]entry)
+}
+
+// END HELPER FUNCTIONS --------------------------------------------
 
 func MakeKvServer(nodeName string, shardMap *ShardMap, clientPool ClientPool) *KvServerImpl {
 	listener := shardMap.MakeListener()
