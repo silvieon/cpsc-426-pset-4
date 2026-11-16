@@ -2,10 +2,10 @@ package kv
 
 import (
 	"context"
-	"time"
-	"fmt" // i added
-	"sync" // i added
+	"fmt"       // i added
 	"math/rand" // i added
+	"sync"      // i added
+	"time"
 
 	"cs426.yale.edu/lab4/kv/proto" // i added
 	"github.com/sirupsen/logrus"
@@ -54,12 +54,12 @@ func (kv *Kv) Get(ctx context.Context, key string) (string, bool, error) {
 
 	start := rand.Intn(len(nodes))
 
-    var lastErr error
+	var lastErr error
 
-    // try each node at most once
-    for i := 0; i < len(nodes); i++ {
+	// try each node at most once
+	for i := 0; i < len(nodes); i++ {
 
-		node := nodes[(start + i)%len(nodes)]
+		node := nodes[(start+i)%len(nodes)]
 
 		// get a client for this node
 		client, err := kv.clientPool.GetClient(node)
@@ -74,7 +74,7 @@ func (kv *Kv) Get(ctx context.Context, key string) (string, bool, error) {
 		})
 		if err != nil {
 			lastErr = err
-            continue
+			continue
 		}
 
 		return response.Value, response.WasFound, nil
@@ -118,7 +118,7 @@ func (kv *Kv) Set(ctx context.Context, key string, value string, ttl time.Durati
 			}
 
 			_, err = client.Set(ctx, &proto.SetRequest{
-				Key: key,
+				Key:   key,
 				Value: value,
 				TtlMs: ttl.Milliseconds(),
 			})
@@ -151,48 +151,48 @@ func (kv *Kv) Delete(ctx context.Context, key string) error {
 	// panic("TODO: Part B")
 
 	// find the shard containing the key
-    shard := GetShardForKey(key, kv.shardMap.NumShards())
+	shard := GetShardForKey(key, kv.shardMap.NumShards())
 
-    // find all nodes hosting that shard
-    nodes := kv.shardMap.NodesForShard(shard)
+	// find all nodes hosting that shard
+	nodes := kv.shardMap.NodesForShard(shard)
 
-    if len(nodes) == 0 {
-        return fmt.Errorf("no nodes host shard %d", shard)
-    }
+	if len(nodes) == 0 {
+		return fmt.Errorf("no nodes host shard %d", shard)
+	}
 
-    var wg sync.WaitGroup
-    errors := make(chan error, len(nodes))
+	var wg sync.WaitGroup
+	errors := make(chan error, len(nodes))
 
 	// send delete to each replica concurrently
-    for _, node := range nodes {
-        wg.Add(1)
+	for _, node := range nodes {
+		wg.Add(1)
 
-        go func(node string) {
-            defer wg.Done()
+		go func(node string) {
+			defer wg.Done()
 
-            client, err := kv.clientPool.GetClient(node)
-            if err != nil {
-                errors <- err
-                return
-            }
+			client, err := kv.clientPool.GetClient(node)
+			if err != nil {
+				errors <- err
+				return
+			}
 
-            _, err = client.Delete(ctx, &proto.DeleteRequest{
-                Key: key,
-            })
-            if err != nil {
-                errors <- err
-            }
-        }(node)
-    }
+			_, err = client.Delete(ctx, &proto.DeleteRequest{
+				Key: key,
+			})
+			if err != nil {
+				errors <- err
+			}
+		}(node)
+	}
 
 	// wait for all del reqs to finish
-    wg.Wait()
-    close(errors)
+	wg.Wait()
+	close(errors)
 
-    // return err if a replica failed
-    for err := range errors {
-        return err
-    }
+	// return err if a replica failed
+	for err := range errors {
+		return err
+	}
 
-    return nil
+	return nil
 }
