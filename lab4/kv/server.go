@@ -238,7 +238,7 @@ func (server *KvServerImpl) copyShard(shard int) map[string]entry {
 	return make(map[string]entry)
 }
 
-// END HELPER FUNCTIONS ------------------------------------------------
+// END HELPER FUNCTIONS --------------------------------------------
 
 func MakeKvServer(nodeName string, shardMap *ShardMap, clientPool ClientPool) *KvServerImpl {
 	listener := shardMap.MakeListener()
