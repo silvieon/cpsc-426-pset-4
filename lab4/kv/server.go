@@ -41,12 +41,11 @@ type shardData struct {
 	items map[string]entry
 }
 
+// DONE: Part C
 func (server *KvServerImpl) handleShardMapUpdate() {
-	// TODO: Part C
-	
-	desired := make(map[int]bool)
+	target := make(map[int]bool)
 	for _, shard := range server.shardMap.ShardsForNode(server.nodeName) {
-		desired[shard] = true
+		target[shard] = true
 	}
 
 	server.mu.RLock()
@@ -58,14 +57,14 @@ func (server *KvServerImpl) handleShardMapUpdate() {
 
 	server.mu.Lock()
 	for shard := range current {
-		if !desired[shard] {
+		if !target[shard] {
 			delete(server.shards, shard)
 		}
 	}
 	server.mu.Unlock()
 
 	var wg sync.WaitGroup
-	for shard := range desired {
+	for shard := range target {
 		if current[shard] {
 			continue
 		}
@@ -78,7 +77,7 @@ func (server *KvServerImpl) handleShardMapUpdate() {
 			server.mu.Lock()
 			server.shards[shard] = data
 			server.mu.Unlock()
-		} ()
+		}()
 	}
 	wg.Wait()
 }
@@ -336,9 +335,32 @@ func (server *KvServerImpl) Delete(
 	return &proto.DeleteResponse{}, nil
 }
 
+// DONE: Part C
 func (server *KvServerImpl) GetShardContents(
 	ctx context.Context,
 	request *proto.GetShardContentsRequest,
 ) (*proto.GetShardContentsResponse, error) {
-	panic("TODO: Part C")
+	data, err := server.lookupShard(int(request.Shard))
+	if err != nil {
+		return nil, err
+	}
+
+	data.mu.RLock()
+	defer data.mu.RUnlock()
+
+	values := make([]*proto.GetShardValue, 0, len(data.items))
+
+	for key, e := range data.items {
+		remainingTtlMs := time.Until(e.expiresAt).Milliseconds()
+		if remainingTtlMs <= 0 {
+			continue // skip expired entries
+		}
+		values = append(values, &proto.GetShardValue{
+			Key:            key,
+			Value:          e.value,
+			TtlMsRemaining: remainingTtlMs,
+		})
+	}
+
+	return &proto.GetShardContentsResponse{Values: values}, nil
 }
